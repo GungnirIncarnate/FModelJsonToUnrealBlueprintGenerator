@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "Blueprint Function Creator",
+	"Description": "Allows programmatic creation of Blueprint functions from JSON data",
+	"Category": "Editor",
+	"CreatedBy": "GungnirIncarnate",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "BlueprintFunctionCreator",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
+		}
+	]
+}

@@ -1,0 +1,27 @@
+# Unreal Engine
+Binaries/
+Intermediate/
+Build/
+*.sln
+*.suo
+*.xcodeproj
+*.xcworkspace
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
