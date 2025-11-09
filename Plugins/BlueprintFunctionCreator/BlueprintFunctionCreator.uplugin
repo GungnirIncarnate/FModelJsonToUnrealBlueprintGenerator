@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0",
+	"Version": 2,
+	"VersionName": "1.1",
 	"FriendlyName": "Blueprint Function Creator",
-	"Description": "Allows programmatic creation of Blueprint functions from JSON data",
+	"Description": "Allows programmatic creation of Blueprint functions and UserDefinedStructs from JSON data",
 	"Category": "Editor",
 	"CreatedBy": "GungnirIncarnate",
 	"CreatedByURL": "",

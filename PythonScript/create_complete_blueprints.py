@@ -10,6 +10,7 @@ REQUIREMENTS:
 3. File → Execute Python Script → Select this file
 
 FEATURES:
+✅ Creates UserDefinedStruct assets first (dependencies)
 ✅ Creates Blueprint assets
 ✅ Adds components from JSON
 ✅ Adds function stubs from JSON (via plugin!)
@@ -19,6 +20,7 @@ FEATURES:
 
 import unreal
 import os
+import json
 from pathlib import Path
 
 
@@ -87,6 +89,99 @@ class CompleteBlueprintConverter:
         best_folder, file_count = max(json_folders, key=lambda x: x[1])
         unreal.log(f"\n✅ Auto-selected: {best_folder.name} ({file_count} JSON files)")
         return str(best_folder)
+    
+    def create_user_defined_struct(self, json_file):
+        """Create a UserDefinedStruct asset from JSON using C++ plugin"""
+        try:
+            unreal.log(f"  📄 Reading JSON: {json_file.name}")
+            
+            # Parse JSON to validate
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            if not isinstance(data, list) or len(data) == 0:
+                unreal.log_warning(f"  ⚠️ Invalid JSON format (not a list or empty)")
+                return False
+            
+            entry = data[0]
+            if entry.get('Type') != 'UserDefinedStruct':
+                unreal.log_warning(f"  ⚠️ Not a UserDefinedStruct (type: {entry.get('Type')})")
+                return False
+            
+            struct_name = entry.get('Name', '')
+            if not struct_name:
+                unreal.log_warning(f"  ⚠️ No struct name found in JSON")
+                return False
+            
+            unreal.log(f"  📦 Struct name: {struct_name}")
+            
+            # Get destination path
+            dest_path, _ = self.get_destination_path(json_file)
+            if not dest_path:
+                unreal.log_error(f"  ❌ Could not determine destination path")
+                return False
+            
+            full_path = f"{dest_path}/{struct_name}"
+            unreal.log(f"  📍 Target path: {full_path}")
+            
+            # Check if already exists
+            if unreal.EditorAssetLibrary.does_asset_exist(full_path):
+                unreal.log(f"  ✅ Struct already exists: {struct_name}")
+                return True
+            
+            # Use C++ plugin to create the struct
+            unreal.log(f"  🔨 Creating struct asset via C++ plugin...")
+            new_struct = self.blueprint_lib.create_user_defined_struct_from_json(
+                str(json_file),
+                dest_path,
+                struct_name
+            )
+            
+            if new_struct:
+                unreal.log(f"  ✅ Created struct: {struct_name} at {full_path}")
+                return True
+            else:
+                unreal.log_error(f"  ❌ Failed to create struct (C++ function returned None)")
+                return False
+                
+        except Exception as e:
+            unreal.log_error(f"  ❌ Exception creating struct {json_file.name}: {str(e)}")
+            import traceback
+            unreal.log_error(traceback.format_exc())
+            return False
+    
+    def process_all_structs(self):
+        """Process all UserDefinedStruct JSON files first"""
+        unreal.log("\n" + "="*80)
+        unreal.log("📦 CREATING USER-DEFINED STRUCTS (Phase 1)")
+        unreal.log("="*80 + "\n")
+        
+        struct_files = []
+        for json_file in self.json_folder.rglob('F_*.json'):
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, list) and len(data) > 0:
+                    if data[0].get('Type') == 'UserDefinedStruct':
+                        struct_files.append(json_file)
+            except Exception:
+                pass
+        
+        unreal.log(f"Found {len(struct_files)} UserDefinedStruct files\n")
+        
+        created = 0
+        failed = 0
+        
+        for i, struct_file in enumerate(struct_files, 1):
+            unreal.log(f"[{i}/{len(struct_files)}] Processing {struct_file.name}")
+            if self.create_user_defined_struct(struct_file):
+                created += 1
+            else:
+                failed += 1
+        
+        unreal.log("\n" + "="*80)
+        unreal.log(f"✅ Struct creation complete: {created} created, {failed} failed")
+        unreal.log("="*80 + "\n")
     
     def get_destination_path(self, json_file_path):
         """Convert JSON file path to Unreal destination path"""
@@ -334,8 +429,13 @@ def main():
         
         unreal.log("✅ BlueprintFunctionCreator plugin detected!")
         
-        # Create converter and process all files
+        # Create converter
         converter = CompleteBlueprintConverter(json_folder=None)  # Auto-detect
+        
+        # PHASE 1: Create UserDefinedStruct assets first (dependencies for Blueprints)
+        converter.process_all_structs()
+        
+        # PHASE 2: Create Blueprint assets
         converter.process_all()
         
     except Exception as e:
