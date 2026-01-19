@@ -21,6 +21,8 @@ FEATURES:
 import unreal
 import os
 import json
+import sys
+import importlib
 from pathlib import Path
 
 
@@ -56,11 +58,13 @@ class CompleteBlueprintConverter:
                 with open(json_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                 if isinstance(data, list) and len(data) > 0:
-                    entry = data[0]
-                    if entry.get('Type') == 'BlueprintGeneratedClass':
-                        name = entry.get('Name', '')
-                        if name:
-                            self.available_blueprints.add(name)
+                    # Scan ALL entries to find the BlueprintGeneratedClass (it might not be first)
+                    for entry in data:
+                        if entry.get('Type') == 'BlueprintGeneratedClass':
+                            name = entry.get('Name', '')
+                            if name:
+                                self.available_blueprints.add(name)
+                                break  # Only need one BlueprintGeneratedClass per file
             except Exception:
                 pass
         
@@ -224,6 +228,14 @@ class CompleteBlueprintConverter:
             unreal.log(f"⏭️ Skipping existing: {asset_name}")
             return True
         
+        # Also check with /Content/Pal/ prefix in case Unreal remapped the path
+        if dest_path.startswith('/Game/Pal/') and not dest_path.startswith('/Game/Pal/Content/'):
+            alt_path = dest_path.replace('/Game/Pal/', '/Game/Pal/Content/Pal/')
+            alt_full_path = f"{alt_path}/{asset_name}"
+            if unreal.EditorAssetLibrary.does_asset_exist(alt_full_path):
+                unreal.log(f"⏭️ Skipping existing (alt path): {asset_name}")
+                return True
+        
         try:
             # Use plugin to create complete Blueprint!
             blueprint = self.blueprint_lib.create_blueprint_from_f_model_json(
@@ -233,9 +245,12 @@ class CompleteBlueprintConverter:
             )
             
             if blueprint:
-                # Force save and refresh asset registry so it's immediately available
+                # Force save the Blueprint
                 full_path = f"{dest_path}/{asset_name}"
                 unreal.EditorAssetLibrary.save_asset(full_path)
+                
+                # Add to our available list immediately for dependency resolution
+                self.available_blueprints.add(asset_name)
                 
                 unreal.log(f"✅ Created with functions: {asset_name}")
                 self.stats['created'] += 1
@@ -261,8 +276,11 @@ class CompleteBlueprintConverter:
                 data = json.load(f)
             
             if isinstance(data, list) and len(data) > 0:
-                entry = data[0]
-                return entry.get('Type') == 'BlueprintGeneratedClass'
+                # Scan ALL entries to find the BlueprintGeneratedClass (it might not be first)
+                for entry in data:
+                    if entry.get('Type') == 'BlueprintGeneratedClass':
+                        return True
+                return False
             
             return False
             
@@ -279,9 +297,15 @@ class CompleteBlueprintConverter:
             
             # Look for BlueprintGeneratedClass with Super field
             if isinstance(data, list) and len(data) > 0:
-                entry = data[0]
-                if entry.get('Type') == 'BlueprintGeneratedClass':
-                    super_obj = entry.get('Super')
+                # Scan ALL entries to find the BlueprintGeneratedClass (it might not be first)
+                blueprint_entry = None
+                for entry in data:
+                    if entry.get('Type') == 'BlueprintGeneratedClass':
+                        blueprint_entry = entry
+                        break
+                
+                if blueprint_entry:
+                    super_obj = blueprint_entry.get('Super')
                     if super_obj and isinstance(super_obj, dict):
                         parent_name = super_obj.get('ObjectName', '')
                         parent_path = super_obj.get('ObjectPath', '')
@@ -301,10 +325,26 @@ class CompleteBlueprintConverter:
                                     parent_asset_name = parent_class_name.replace('_C', '')
                                     # Remove the .0 or other suffixes from the path and build proper path
                                     parent_asset_path = parent_path.rsplit('.', 1)[0]  # Remove .0
+                                    # Use asset name (remove _C suffix only from end) for existence check
+                                    if parent_class_name.endswith('_C'):
+                                        parent_asset_name = parent_class_name[:-2]  # Remove last 2 characters
+                                    else:
+                                        parent_asset_name = parent_class_name
                                     parent_full_path = f"{parent_asset_path}.{parent_asset_name}"
                                     
                                     exists = unreal.EditorAssetLibrary.does_asset_exist(parent_full_path)
                                     unreal.log(f"  Checking path: {parent_full_path}, Exists: {exists}")
+                                    
+                                    # If not found, try with /Content/Pal/ prefix (Unreal may remap paths)
+                                    if not exists and parent_asset_path.startswith('/Game/Pal/') and not parent_asset_path.startswith('/Game/Pal/Content/'):
+                                        # The actual structure is /Game/Pal/Content/Pal/...
+                                        alt_path = parent_asset_path.replace('/Game/Pal/', '/Game/Pal/Content/Pal/')
+                                        alt_full_path = f"{alt_path}.{parent_asset_name}"
+                                        exists = unreal.EditorAssetLibrary.does_asset_exist(alt_full_path)
+                                        if exists:
+                                            unreal.log(f"  ✓ Found at alternate path: {alt_full_path}")
+                                        else:
+                                            unreal.log(f"  ✗ Also checked: {alt_full_path}, Exists: {exists}")
                                     
                                     if not exists:
                                         unreal.log(f"  ⏸️ Waiting for parent: {parent_class_name}")
@@ -327,6 +367,79 @@ class CompleteBlueprintConverter:
             unreal.log_warning(f"Error checking parent for {json_file.name}: {str(e)}")
             return True  # Proceed anyway if we can't check
     
+    def sort_by_dependencies(self, json_files):
+        """Sort JSON files by dependency order - parents before children"""
+        import json
+        
+        # Build dependency map: child -> parent_file
+        file_to_class = {}  # json_file -> class_name
+        class_to_file = {}  # class_name -> json_file
+        dependencies = {}   # child_class -> parent_class
+        
+        # First pass: map files to class names
+        for json_file in json_files:
+            try:
+                with open(json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if isinstance(data, list) and len(data) > 0:
+                    for entry in data:
+                        if entry.get('Type') == 'BlueprintGeneratedClass':
+                            class_name = entry.get('Name', '')
+                            if class_name:
+                                file_to_class[json_file] = class_name
+                                class_to_file[class_name] = json_file
+                                
+                                # Extract parent dependency
+                                super_obj = entry.get('Super')
+                                if super_obj and isinstance(super_obj, dict):
+                                    parent_name = super_obj.get('ObjectName', '')
+                                    if parent_name.startswith('BlueprintGeneratedClass'):
+                                        if "'" in parent_name:
+                                            parent_class = parent_name.split("'")[1]
+                                            dependencies[class_name] = parent_class
+                                break
+            except Exception:
+                continue
+        
+        # Topological sort - parents before children
+        sorted_files = []
+        processed = set()
+        in_progress = set()
+        
+        def visit(json_file):
+            if json_file in processed:
+                return
+            if json_file in in_progress:
+                return  # Circular dependency, skip
+                
+            class_name = file_to_class.get(json_file)
+            if not class_name:
+                sorted_files.append(json_file)
+                processed.add(json_file)
+                return
+                
+            in_progress.add(json_file)
+            
+            # Process parent first
+            parent_class = dependencies.get(class_name)
+            if parent_class and parent_class in class_to_file:
+                parent_file = class_to_file[parent_class]
+                if parent_file not in processed:
+                    visit(parent_file)
+            
+            # Now process this file
+            sorted_files.append(json_file)
+            processed.add(json_file)
+            in_progress.remove(json_file)
+        
+        # Visit all files
+        for json_file in json_files:
+            visit(json_file)
+            
+        unreal.log(f"  Sorted {len(sorted_files)} files by dependency order")
+        return sorted_files
+    
     def process_all(self):
         """Process all JSON files with multi-pass for parent dependencies"""
         all_json_files = list(self.json_folder.rglob('*.json'))
@@ -334,6 +447,10 @@ class CompleteBlueprintConverter:
         # Filter to only Blueprint JSON files
         unreal.log("Filtering Blueprint JSON files...")
         json_files = [f for f in all_json_files if self.is_blueprint_json(f)]
+        
+        # Sort by dependency order - parents first
+        unreal.log("Sorting by dependency order...")
+        json_files = self.sort_by_dependencies(json_files)
         
         total = len(json_files)
         non_blueprint_count = len(all_json_files) - total
@@ -346,7 +463,7 @@ class CompleteBlueprintConverter:
         unreal.log("="*80 + "\n")
         
         skipped = []
-        max_passes = 10  # Prevent infinite loops
+        max_passes = 15  # Prevent infinite loops - increased for better dependency resolution
         current_pass = 1
         
         while json_files and current_pass <= max_passes:
@@ -382,6 +499,13 @@ class CompleteBlueprintConverter:
             
             json_files = still_skipped
             current_pass += 1
+            
+            # Force asset registry refresh between passes to pick up newly created assets
+            if json_files and current_pass <= max_passes:
+                unreal.log(f"🔄 Refreshing asset registry for pass {current_pass}...")
+                # Give UE5 a moment to fully process the assets
+                import time
+                time.sleep(0.1)
         
         if current_pass > max_passes:
             unreal.log_warning(f"⚠️ Reached maximum passes ({max_passes})")

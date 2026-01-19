@@ -1976,7 +1976,9 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 		}
 	}
 
-	return OutFunctionNames.Num() > 0 || OutComponentNames.Num() > 0 || OutVariableNames.Num() > 0;
+	// Even if no functions/components/variables found, still return true for valid Blueprint JSON
+	// Simple Blueprints that just inherit from parents are valid and should be created
+	return true;
 }
 
 UBlueprint* UDummyBlueprintFunctionLibrary::CreateBlueprintFromFModelJSON(const FString& JsonFilePath, const FString& DestinationPath, const FString& AssetName)
@@ -2050,6 +2052,15 @@ UBlueprint* UDummyBlueprintFunctionLibrary::CreateBlueprintFromFModelJSON(const 
 			
 			// Try to load the parent Blueprint
 			UBlueprint* ParentBlueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
+			
+			// If not found, try alternate path with /Content/Pal/ insertion
+			if (!ParentBlueprint && AssetPath.StartsWith(TEXT("/Game/Pal/")))
+			{
+				FString AlternatePath = AssetPath.Replace(TEXT("/Game/Pal/"), TEXT("/Game/Pal/Content/Pal/"));
+				UE_LOG(LogTemp, Log, TEXT("Trying alternate parent path: %s"), *AlternatePath);
+				ParentBlueprint = LoadObject<UBlueprint>(nullptr, *AlternatePath);
+			}
+			
 			if (ParentBlueprint)
 			{
 				// Ensure parent is compiled so we can check for inherited functions
