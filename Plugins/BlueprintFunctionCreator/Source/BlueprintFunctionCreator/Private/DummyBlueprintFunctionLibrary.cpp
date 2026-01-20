@@ -239,7 +239,62 @@ bool UDummyBlueprintFunctionLibrary::AddFunctionStubToBlueprint(UBlueprint* Blue
 		else if (PropType == TEXT("EnumProperty"))
 		{
 			ReturnPinType.PinCategory = UEdGraphSchema_K2::PC_Byte;
-			// TODO: Could extract enum type from JSON if needed
+			
+			// Try to extract the specific enum class from ClassName
+			if (!ClassName.IsEmpty())
+			{
+				// ClassName contains the enum class like "Class'EPalAdditionalEffectType'"
+				FString EnumClassName = ClassName;
+				if (EnumClassName.StartsWith(TEXT("Class'")))
+				{
+					EnumClassName.RemoveFromStart(TEXT("Class'"));
+					EnumClassName.RemoveFromEnd(TEXT("'"));
+				}
+				
+				UE_LOG(LogTemp, Log, TEXT("  Looking for enum class: %s"), *EnumClassName);
+				
+				// Try to find the enum
+				UEnum* EnumClass = FindObject<UEnum>(nullptr, *EnumClassName);
+				if (!EnumClass)
+				{
+					// Try with full path if provided
+					if (!ClassPath.IsEmpty())
+					{
+						FString FullEnumPath = ClassPath + TEXT(".") + EnumClassName;
+						EnumClass = FindObject<UEnum>(nullptr, *FullEnumPath);
+					}
+					
+					// Try common engine paths
+					if (!EnumClass)
+					{
+						TArray<FString> CommonPaths = {
+							FString::Printf(TEXT("/Script/Pal.%s"), *EnumClassName),
+							FString::Printf(TEXT("/Script/Engine.%s"), *EnumClassName),
+							FString::Printf(TEXT("/Script/CoreUObject.%s"), *EnumClassName)
+						};
+						
+						for (const FString& Path : CommonPaths)
+						{
+							EnumClass = FindObject<UEnum>(nullptr, *Path);
+							if (EnumClass)
+							{
+								UE_LOG(LogTemp, Log, TEXT("  ✓ Found enum at path: %s"), *Path);
+								break;
+							}
+						}
+					}
+				}
+				
+				if (EnumClass)
+				{
+					ReturnPinType.PinSubCategoryObject = EnumClass;
+					UE_LOG(LogTemp, Log, TEXT("  ✓ Set enum type to: %s"), *EnumClass->GetName());
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("  ✗ Could not find enum class: %s"), *EnumClassName);
+				}
+			}
 		}
 		else if (PropType == TEXT("StructProperty"))
 		{
@@ -1095,7 +1150,9 @@ bool UDummyBlueprintFunctionLibrary::AddFunctionStubToBlueprint(UBlueprint* Blue
 		ReturnPin->DesiredPinDirection = EGPD_Input;
 		ResultNode->UserDefinedPins.Add(ReturnPin);
 		
-		ResultNode->AllocateDefaultPins();
+		// Force reconstruction of pins to ensure proper type matching
+		ResultNode->ReconstructNode();
+		
 		NewGraph->AddNode(ResultNode);
 		ResultNode->NodePosX = 400;
 		ResultNode->NodePosY = 0;
@@ -1152,14 +1209,27 @@ int32 UDummyBlueprintFunctionLibrary::AddMultipleFunctionStubsToBlueprint(UBluep
 			}
 		}
 		
-		// Check if it's inherited from parent class
-		if (!bExists && Blueprint->ParentClass)
+		// For dummy Blueprints, we want to create override functions even if they exist in parent
+		// This ensures child Blueprints can access and override these functions properly
+		bool bIsOverride = false;
+		UFunction* ParentFunction = nullptr;
+		if (Blueprint->ParentClass)
 		{
-			UFunction* InheritedFunc = Blueprint->ParentClass->FindFunctionByName(FuncName);
-			if (InheritedFunc)
+			ParentFunction = Blueprint->ParentClass->FindFunctionByName(FuncName);
+			if (ParentFunction)
 			{
-				bExists = true;
-				UE_LOG(LogTemp, Warning, TEXT("Function %s is inherited from parent, skipping"), *FuncName.ToString());
+				bIsOverride = true;
+				UE_LOG(LogTemp, Warning, TEXT("Function %s exists in parent, creating as override"), *FuncName.ToString());
+				
+				// Skip functions that are likely to have complex signatures we can't replicate
+				// These are usually engine event functions that child Blueprints shouldn't override
+				if (FuncName.ToString().Contains(TEXT("Receive")) || 
+					FuncName.ToString().Contains(TEXT("Event")) ||
+					FuncName.ToString().StartsWith(TEXT("On")))
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Skipping complex event function: %s"), *FuncName.ToString());
+					continue;
+				}
 			}
 		}
 
@@ -1181,8 +1251,19 @@ int32 UDummyBlueprintFunctionLibrary::AddMultipleFunctionStubsToBlueprint(UBluep
 
 int32 UDummyBlueprintFunctionLibrary::AddComponentsToBlueprint(UBlueprint* Blueprint, const TArray<FName>& ComponentNames, const TArray<FString>& ComponentClasses)
 {
+	UE_LOG(LogTemp, Warning, TEXT("=== AddComponentsToBlueprint called ==="));
+	UE_LOG(LogTemp, Warning, TEXT("ComponentNames.Num() = %d, ComponentClasses.Num() = %d"), ComponentNames.Num(), ComponentClasses.Num());
+	
+	for (int32 i = 0; i < ComponentNames.Num(); i++)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("Component %d: Name='%s', Class='%s'"), i, *ComponentNames[i].ToString(), 
+			i < ComponentClasses.Num() ? *ComponentClasses[i] : TEXT("MISSING CLASS"));
+	}
+	
 	if (!Blueprint || ComponentNames.Num() != ComponentClasses.Num())
 	{
+		UE_LOG(LogTemp, Error, TEXT("AddComponentsToBlueprint: Failed validation - Blueprint: %s, ComponentNames: %d, ComponentClasses: %d"), 
+			Blueprint ? TEXT("Valid") : TEXT("NULL"), ComponentNames.Num(), ComponentClasses.Num());
 		return 0;
 	}
 
@@ -1198,6 +1279,8 @@ int32 UDummyBlueprintFunctionLibrary::AddComponentsToBlueprint(UBlueprint* Bluep
 	{
 		FName CompName = ComponentNames[i];
 		FString CompClassName = ComponentClasses[i];
+		
+		UE_LOG(LogTemp, Warning, TEXT("Processing component %d: '%s' of class '%s'"), i, *CompName.ToString(), *CompClassName);
 
 		// Get the component class
 		UClass* ComponentClass = nullptr;
@@ -1205,31 +1288,53 @@ int32 UDummyBlueprintFunctionLibrary::AddComponentsToBlueprint(UBlueprint* Bluep
 		if (CompClassName == TEXT("SceneComponent"))
 		{
 			ComponentClass = USceneComponent::StaticClass();
+			UE_LOG(LogTemp, Warning, TEXT("  Using built-in SceneComponent class"));
 		}
 		else if (CompClassName == TEXT("StaticMeshComponent"))
 		{
 			ComponentClass = UStaticMeshComponent::StaticClass();
+			UE_LOG(LogTemp, Warning, TEXT("  Using built-in StaticMeshComponent class"));
 		}
 		else if (CompClassName == TEXT("SkeletalMeshComponent"))
 		{
 			ComponentClass = USkeletalMeshComponent::StaticClass();
+			UE_LOG(LogTemp, Warning, TEXT("  Using built-in SkeletalMeshComponent class"));
 		}
 		else
 		{
 			// Try to load the class
 			FString ClassPath = FString::Printf(TEXT("/Script/Engine.%s"), *CompClassName);
+			UE_LOG(LogTemp, Warning, TEXT("  Attempting to load class from: %s"), *ClassPath);
 			ComponentClass = LoadClass<UActorComponent>(nullptr, *ClassPath);
+			
+			if (!ComponentClass)
+			{
+				// Try Pal module
+				FString PalClassPath = FString::Printf(TEXT("/Script/Pal.%s"), *CompClassName);
+				UE_LOG(LogTemp, Warning, TEXT("  Engine failed, trying Pal module: %s"), *PalClassPath);
+				ComponentClass = LoadClass<UActorComponent>(nullptr, *PalClassPath);
+			}
 		}
 
 		if (ComponentClass)
 		{
+			UE_LOG(LogTemp, Warning, TEXT("  ✅ Found component class: %s"), *ComponentClass->GetName());
 			// Create SCS node
 			USCS_Node* NewNode = SCS->CreateNode(ComponentClass, CompName);
 			if (NewNode)
 			{
 				SCS->AddNode(NewNode);
 				SuccessCount++;
+				UE_LOG(LogTemp, Warning, TEXT("  ✅ Successfully added component: %s"), *CompName.ToString());
 			}
+			else
+			{
+				UE_LOG(LogTemp, Error, TEXT("  ❌ Failed to create SCS node for: %s"), *CompName.ToString());
+			}
+		}
+		else
+		{
+			UE_LOG(LogTemp, Error, TEXT("  ❌ Could not load component class: %s"), *CompClassName);
 		}
 	}
 
@@ -1295,6 +1400,47 @@ int32 UDummyBlueprintFunctionLibrary::AddVariablesToBlueprint(UBlueprint* Bluepr
 		else if (VarType == TEXT("FText"))
 		{
 			PinType.PinCategory = UEdGraphSchema_K2::PC_Text;
+		}
+		else if (VarType.StartsWith(TEXT("ObjectProperty|")))
+		{
+			// Handle ObjectProperty|ComponentClass|/Script/Engine format for component references
+			PinType.PinCategory = UEdGraphSchema_K2::PC_Object;
+			
+			// Parse the format: ObjectProperty|ComponentClass|/Script/Engine
+			TArray<FString> Parts;
+			VarType.ParseIntoArray(Parts, TEXT("|"));
+			
+			if (Parts.Num() >= 2)
+			{
+				FString ComponentClass = Parts[1];
+				FString ClassPath = FString::Printf(TEXT("/Script/Engine.%s"), *ComponentClass);
+				
+				UE_LOG(LogTemp, Log, TEXT("  Component reference variable - trying to load class: %s"), *ClassPath);
+				
+				UClass* FoundClass = LoadObject<UClass>(nullptr, *ClassPath);
+				if (FoundClass)
+				{
+					PinType.PinSubCategoryObject = FoundClass;
+					UE_LOG(LogTemp, Log, TEXT("  ✅ Found component class: %s"), *ComponentClass);
+				}
+				else
+				{
+					UE_LOG(LogTemp, Warning, TEXT("  ⚠️ Could not load component class: %s, using generic UObject"), *ComponentClass);
+					PinType.PinSubCategoryObject = UObject::StaticClass();
+				}
+			}
+			else
+			{
+				UE_LOG(LogTemp, Warning, TEXT("  ⚠️ Invalid ObjectProperty format: %s"), *VarType);
+				PinType.PinSubCategoryObject = UObject::StaticClass();
+			}
+		}
+		else if (VarType.StartsWith(TEXT("TArray<")))
+		{
+			// Handle TArray types
+			PinType.ContainerType = EPinContainerType::Array;
+			PinType.PinCategory = UEdGraphSchema_K2::PC_Object;
+			PinType.PinSubCategoryObject = UObject::StaticClass();  // Simplified for now
 		}
 		else
 		{
@@ -1483,6 +1629,8 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 								FString ClassName;
 								(*PropertyClass)->TryGetStringField(TEXT("ObjectName"), ClassName);
 								
+								UE_LOG(LogTemp, Warning, TEXT("Found ObjectProperty: %s with class: %s"), *PropName, *ClassName);
+								
 								// Check if it's a component class
 								if (ClassName.Contains(TEXT("Component")))
 								{
@@ -1492,9 +1640,12 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 										ClassName.RemoveFromStart(TEXT("Class'"));
 										ClassName.RemoveFromEnd(TEXT("'"));
 										
-										// Use AddUnique to avoid duplicates
-										OutComponentNames.AddUnique(FName(*PropName));
-										OutComponentClasses.AddUnique(ClassName);
+										UE_LOG(LogTemp, Warning, TEXT("*** ADDING COMPONENT REFERENCE VARIABLE: %s (%s)"), *PropName, *ClassName);
+										
+										// Add as a variable reference instead of actual component
+										FString VarType = FString::Printf(TEXT("ObjectProperty|%s|/Script/Engine"), *ClassName);
+										OutVariableNames.Add(FName(*PropName));
+										OutVariableTypes.Add(VarType);
 									}
 								}
 							}
@@ -1507,7 +1658,8 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 						         PropType == TEXT("ByteProperty") ||
 						         PropType == TEXT("StrProperty") ||
 						         PropType == TEXT("NameProperty") ||
-						         PropType == TEXT("TextProperty"))
+						         PropType == TEXT("TextProperty") ||
+						         PropType == TEXT("ArrayProperty"))
 						{
 							if (!PropName.IsEmpty())
 							{
@@ -1540,6 +1692,8 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 										VarType = TEXT("FName");
 									else if (PropType == TEXT("TextProperty"))
 										VarType = TEXT("FText");
+									else if (PropType == TEXT("ArrayProperty"))
+										VarType = TEXT("TArray<UObject*>"); // Simplified for now
 									
 									if (!VarType.IsEmpty())
 									{
@@ -1553,16 +1707,112 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 					}
 				}
 			}
+			
+			// Also scan for properties stored directly on the BlueprintGeneratedClass (not in ChildProperties)
+			// These are often component references and class-level variables like MuzzleArray, LaserRoot, etc.
+			UE_LOG(LogTemp, Warning, TEXT("=== SCANNING CLASS-LEVEL PROPERTIES ==="));
+			for (auto& Elem : (*EntryObj)->Values)
+			{
+				FString PropName = Elem.Key;
+				
+				// Skip known structural fields
+				if (PropName == TEXT("Type") || PropName == TEXT("Name") || PropName == TEXT("Class") || 
+				    PropName == TEXT("Super") || PropName == TEXT("Flags") || PropName == TEXT("Properties") ||
+				    PropName == TEXT("Children") || PropName == TEXT("ChildProperties") || PropName == TEXT("FuncMap") ||
+				    PropName == TEXT("ClassFlags") || PropName == TEXT("ClassWithin") || PropName == TEXT("ClassConfigName") ||
+				    PropName == TEXT("bCooked") || PropName == TEXT("ClassDefaultObject") || PropName == TEXT("EditorTags"))
+				{
+					continue;
+				}
+				
+				UE_LOG(LogTemp, Warning, TEXT("Checking class property: %s"), *PropName);
+				
+				if (Elem.Value.IsValid() && Elem.Value->Type == EJson::Object)
+				{
+					const TSharedPtr<FJsonObject>* PropObj;
+					if (Elem.Value->TryGetObject(PropObj) && PropObj->IsValid())
+					{
+						FString PropType;
+						if ((*PropObj)->TryGetStringField(TEXT("Type"), PropType))
+						{
+							UE_LOG(LogTemp, Log, TEXT("Found additional class property: %s (%s)"), *PropName, *PropType);
+							
+							if (PropType == TEXT("ObjectProperty"))
+							{
+								// Check if it's a component
+								const TSharedPtr<FJsonObject>* PropertyClass;
+								if ((*PropObj)->TryGetObjectField(TEXT("PropertyClass"), PropertyClass))
+								{
+									FString ClassName;
+									(*PropertyClass)->TryGetStringField(TEXT("ObjectName"), ClassName);
+									
+									UE_LOG(LogTemp, Warning, TEXT("Class-level ObjectProperty: %s with class: %s"), *PropName, *ClassName);
+									
+									if (ClassName.Contains(TEXT("Component")))
+									{
+										ClassName.RemoveFromStart(TEXT("Class'"));
+										ClassName.RemoveFromEnd(TEXT("'"));
+										
+										// Add as a variable reference instead of actual component
+										FString VarType = FString::Printf(TEXT("ObjectProperty|%s|/Script/Engine"), *ClassName);
+										OutVariableNames.Add(FName(*PropName));
+										OutVariableTypes.Add(VarType);
+										UE_LOG(LogTemp, Log, TEXT("*** ADDED CLASS-LEVEL COMPONENT REFERENCE VARIABLE: %s (%s)"), *PropName, *ClassName);
+									}
+								}
+							}
+							else if (PropType == TEXT("ArrayProperty"))
+							{
+								// Handle array properties (like MuzzleArray)
+								OutVariableNames.AddUnique(FName(*PropName));
+								OutVariableTypes.Add(TEXT("TArray<UObject*>")); // Simplified array type
+								UE_LOG(LogTemp, Log, TEXT("Added class-level array variable: %s"), *PropName);
+							}
+							else if (PropType == TEXT("BoolProperty") || PropType == TEXT("IntProperty") || 
+							         PropType == TEXT("FloatProperty") || PropType == TEXT("DoubleProperty") ||
+							         PropType == TEXT("ByteProperty") || PropType == TEXT("StrProperty") ||
+							         PropType == TEXT("NameProperty") || PropType == TEXT("TextProperty"))
+							{
+								// Handle other variable types
+								FString VarType;
+								if (PropType == TEXT("BoolProperty"))
+									VarType = TEXT("bool");
+								else if (PropType == TEXT("IntProperty"))
+									VarType = TEXT("int32");
+								else if (PropType == TEXT("FloatProperty"))
+									VarType = TEXT("float");
+								else if (PropType == TEXT("DoubleProperty"))
+									VarType = TEXT("double");
+								else if (PropType == TEXT("ByteProperty"))
+									VarType = TEXT("uint8");
+								else if (PropType == TEXT("StrProperty"))
+									VarType = TEXT("FString");
+								else if (PropType == TEXT("NameProperty"))
+									VarType = TEXT("FName");
+								else if (PropType == TEXT("TextProperty"))
+									VarType = TEXT("FText");
+								
+								if (!VarType.IsEmpty())
+								{
+									OutVariableNames.AddUnique(FName(*PropName));
+									OutVariableTypes.Add(VarType);
+									UE_LOG(LogTemp, Log, TEXT("Added class-level variable: %s (%s)"), *PropName, *VarType);
+								}
+							}
+						}
+					}
+				}
+			}
 
 			break;
 		}
 	}
 
-	// Parse Function objects to extract return types
+	// Parse Function objects to extract return types AND add function names
 	// Build a map of function name -> return type info (Type|ClassName format)
 	TMap<FString, FString> FunctionReturnTypeMap;
 	
-	UE_LOG(LogTemp, Log, TEXT("Parsing Function objects for return types..."));
+	UE_LOG(LogTemp, Log, TEXT("Parsing Function objects for return types AND function names..."));
 	
 	for (const TSharedPtr<FJsonValue>& Entry : *JsonArray)
 	{
@@ -1587,6 +1837,17 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 			
 			// Replace spaces with underscores to match how we process Children array
 			FuncName = FuncName.Replace(TEXT(" "), TEXT("_"));
+			
+			// ADD THIS FUNCTION TO THE OUTPUT LIST (this was missing!)
+			if (!FuncName.IsEmpty() && FuncName != TEXT("None"))
+			{
+				FName FuncFName(*FuncName);
+				if (FuncFName.IsValid() && !FuncFName.IsNone())
+				{
+					UE_LOG(LogTemp, Warning, TEXT("Adding function from standalone Function entry: %s"), *FuncName);
+					OutFunctionNames.AddUnique(FuncFName);
+				}
+			}
 			
 			// Track that we found this function (even if it has no return value)
 			bool bFoundReturnParam = false;
@@ -1665,6 +1926,41 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 									ReturnTypeInfo += TEXT("|") + ClassPath;
 								}
 								UE_LOG(LogTemp, Log, TEXT("  Function '%s' has return type: %s (Class: %s, Path: %s)"), *FuncName, *PropType, *ClassName, *ClassPath);
+							}
+						}
+						// For Enum types, try to get the specific enum class name from Enum field
+						else if (PropType == TEXT("EnumProperty"))
+						{
+							FString EnumClassName;
+							FString EnumPath;
+							
+							const TSharedPtr<FJsonObject>* EnumObj;
+							if ((*PropObj)->TryGetObjectField(TEXT("Enum"), EnumObj))
+							{
+								(*EnumObj)->TryGetStringField(TEXT("ObjectName"), EnumClassName);
+								(*EnumObj)->TryGetStringField(TEXT("ObjectPath"), EnumPath);
+								
+								if (!EnumClassName.IsEmpty())
+								{
+									// ObjectName is like "Class'EPalAdditionalEffectType'" - extract just the name
+									if (EnumClassName.Contains(TEXT("'")))
+									{
+										int32 StartIdx = EnumClassName.Find(TEXT("'"), ESearchCase::CaseSensitive) + 1;
+										int32 EndIdx = EnumClassName.Find(TEXT("'"), ESearchCase::CaseSensitive, ESearchDir::FromEnd);
+										if (StartIdx > 0 && EndIdx > StartIdx)
+										{
+											EnumClassName = EnumClassName.Mid(StartIdx, EndIdx - StartIdx);
+										}
+									}
+									
+									// Store as "Type|EnumClassName|EnumPath" format
+									ReturnTypeInfo = PropType + TEXT("|") + EnumClassName;
+									if (!EnumPath.IsEmpty())
+									{
+										ReturnTypeInfo += TEXT("|") + EnumPath;
+									}
+									UE_LOG(LogTemp, Log, TEXT("  Function '%s' has return type: %s (Enum: %s, Path: %s)"), *FuncName, *PropType, *EnumClassName, *EnumPath);
+								}
 							}
 						}
 						// For Struct types, try to get the specific struct name
@@ -2053,22 +2349,18 @@ UBlueprint* UDummyBlueprintFunctionLibrary::CreateBlueprintFromFModelJSON(const 
 			// Try to load the parent Blueprint
 			UBlueprint* ParentBlueprint = LoadObject<UBlueprint>(nullptr, *AssetPath);
 			
-			// If not found, try alternate path with /Content/Pal/ insertion
-			if (!ParentBlueprint && AssetPath.StartsWith(TEXT("/Game/Pal/")))
+			// If not found, try alternate path with /Content/Pal/ insertion (for old incorrectly nested assets)
+			if (!ParentBlueprint && AssetPath.StartsWith(TEXT("/Game/Pal/")) && !AssetPath.Contains(TEXT("/Content/")))
 			{
 				FString AlternatePath = AssetPath.Replace(TEXT("/Game/Pal/"), TEXT("/Game/Pal/Content/Pal/"));
-				UE_LOG(LogTemp, Log, TEXT("Trying alternate parent path: %s"), *AlternatePath);
+				UE_LOG(LogTemp, Log, TEXT("Trying legacy nested path: %s"), *AlternatePath);
 				ParentBlueprint = LoadObject<UBlueprint>(nullptr, *AlternatePath);
 			}
 			
 			if (ParentBlueprint)
 			{
-				// Ensure parent is compiled so we can check for inherited functions
-				if (!ParentBlueprint->GeneratedClass || ParentBlueprint->Status != BS_UpToDate)
-				{
-					UE_LOG(LogTemp, Log, TEXT("Parent Blueprint needs compilation, compiling now..."));
-					FKismetEditorUtilities::CompileBlueprint(ParentBlueprint);
-			}
+				// Skip compilation for performance - parent should already be available
+				UE_LOG(LogTemp, Log, TEXT("Using parent Blueprint without compilation for performance"));
 			
 			if (ParentBlueprint->GeneratedClass)
 			{
@@ -2106,13 +2398,12 @@ UBlueprint* UDummyBlueprintFunctionLibrary::CreateBlueprintFromFModelJSON(const 
 	}
 
 	// Log what we parsed
-	UE_LOG(LogTemp, Log, TEXT("Parsed: %d functions, %d components, %d variables"), FunctionNames.Num(), ComponentNames.Num(), VariableNames.Num());
+	UE_LOG(LogTemp, Log, TEXT("Parsed: %d functions, %d component references (as variables), %d variables"), FunctionNames.Num(), ComponentNames.Num(), VariableNames.Num());
 	
-	// Add components
-	int32 CompCount = AddComponentsToBlueprint(NewBlueprint, ComponentNames, ComponentClasses);
-	UE_LOG(LogTemp, Log, TEXT("Added %d components"), CompCount);
+	// Skip component creation - components are now added as reference variables instead
+	UE_LOG(LogTemp, Log, TEXT("Skipping component creation - using component reference variables instead"));
 
-	// Add variables
+	// Add variables (including component references)
 	UE_LOG(LogTemp, Log, TEXT("Attempting to add %d variables..."), VariableNames.Num());
 	int32 VarCount = AddVariablesToBlueprint(NewBlueprint, VariableNames, VariableTypes);
 	UE_LOG(LogTemp, Log, TEXT("Added %d variables"), VarCount);
@@ -2121,8 +2412,24 @@ UBlueprint* UDummyBlueprintFunctionLibrary::CreateBlueprintFromFModelJSON(const 
 	int32 FuncCount = AddMultipleFunctionStubsToBlueprint(NewBlueprint, FunctionNames, FunctionReturnTypes);
 	UE_LOG(LogTemp, Log, TEXT("Added %d functions"), FuncCount);
 
-	// Compile blueprint
-	FKismetEditorUtilities::CompileBlueprint(NewBlueprint);
+	// Skip compilation for performance - dummy Blueprints don't need to be executable
+	UE_LOG(LogTemp, Log, TEXT("Skipping Blueprint compilation for performance"));
+	
+	// Note: Blueprint left uncompiled for performance - it will be compiled on-demand if needed
+	
+	// Mark as modified and refresh to ensure it's properly registered
+	FBlueprintEditorUtils::MarkBlueprintAsModified(NewBlueprint);
+	FBlueprintEditorUtils::RefreshAllNodes(NewBlueprint);
+	
+	// Verify the generated class is valid
+	if (!NewBlueprint->GeneratedClass)
+	{
+		UE_LOG(LogTemp, Error, TEXT("Generated class is null for Blueprint: %s"), *AssetName);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Log, TEXT("Successfully created Blueprint with GeneratedClass: %s"), *NewBlueprint->GeneratedClass->GetName());
+	}
 
 	// Save
 	FString PackageName = DestinationPath + TEXT("/") + AssetName;

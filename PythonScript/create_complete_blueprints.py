@@ -203,12 +203,34 @@ class CompleteBlueprintConverter:
         path_parts = list(rel_path.parts[:-1])
         asset_name = rel_path.stem
         
+        # Debug logging
+        unreal.log(f"🐛 PATH DEBUG for {asset_name}:")
+        unreal.log(f"  json_file_path: {json_file_path}")
+        unreal.log(f"  json_folder: {self.json_folder}")
+        unreal.log(f"  rel_path: {rel_path}")
+        unreal.log(f"  path_parts: {path_parts}")
+        
         # Build Unreal path
         if path_parts and path_parts[0] == 'Game':
             dest_path = '/' + '/'.join(path_parts)
+            unreal.log(f"  Using Game path: {dest_path}")
+        elif path_parts and len(path_parts) >= 3 and path_parts[0] == 'Pal' and path_parts[1] == 'Content' and path_parts[2] == 'Pal':
+            # Path has Pal/Content/Pal structure, skip the Content/Pal part to get /Game/Pal/Blueprint/...
+            # Remove 'Pal/Content' to get the correct path (Pal/Content/Pal/Blueprint/Weapon -> Pal/Blueprint/Weapon)
+            corrected_parts = [path_parts[0]] + path_parts[3:]  # Keep first 'Pal', skip 'Content/Pal', keep the rest
+            dest_path = '/Game/' + '/'.join(corrected_parts)
+            unreal.log(f"  Using corrected path: {dest_path} (was Pal/Content/Pal structure)")
+        elif path_parts and len(path_parts) >= 2 and path_parts[0] == 'Content' and path_parts[1] == 'Pal':
+            # Path has Content/Pal structure (when json_folder is Processing/Pal), skip the Content part
+            # Content/Pal/Blueprint/Action -> Pal/Blueprint/Action
+            corrected_parts = path_parts[1:]  # Skip 'Content', keep 'Pal' and rest
+            dest_path = '/Game/' + '/'.join(corrected_parts)
+            unreal.log(f"  Using corrected path: {dest_path} (was Content/Pal structure)")
         else:
             dest_path = '/Game/Pal/' + '/'.join(path_parts) if path_parts else '/Game/Pal'
+            unreal.log(f"  Using default path: {dest_path}")
         
+        unreal.log(f"  Final result: {dest_path}/{asset_name}")
         return dest_path, asset_name
     
     def process_json_file(self, json_file):
@@ -227,14 +249,6 @@ class CompleteBlueprintConverter:
         if unreal.EditorAssetLibrary.does_asset_exist(full_path):
             unreal.log(f"⏭️ Skipping existing: {asset_name}")
             return True
-        
-        # Also check with /Content/Pal/ prefix in case Unreal remapped the path
-        if dest_path.startswith('/Game/Pal/') and not dest_path.startswith('/Game/Pal/Content/'):
-            alt_path = dest_path.replace('/Game/Pal/', '/Game/Pal/Content/Pal/')
-            alt_full_path = f"{alt_path}/{asset_name}"
-            if unreal.EditorAssetLibrary.does_asset_exist(alt_full_path):
-                unreal.log(f"⏭️ Skipping existing (alt path): {asset_name}")
-                return True
         
         try:
             # Use plugin to create complete Blueprint!
