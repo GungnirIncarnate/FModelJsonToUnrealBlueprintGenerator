@@ -1878,9 +1878,7 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 					{
 						FString PropType;
 						(*PropObj)->TryGetStringField(TEXT("Type"), PropType);
-						
-						// Build return type info string (may include class/struct name)
-						FString ReturnTypeInfo = PropType;
+						FString ReturnTypeInfo; // Store the formatted return type info
 						
 						// For Class/Object types, try to get the specific class name from MetaClass or PropertyClass
 						if (PropType == TEXT("ClassProperty") || PropType == TEXT("ObjectProperty"))
@@ -2221,6 +2219,8 @@ bool UDummyBlueprintFunctionLibrary::ParseFModelJSON(const FString& JsonFilePath
 						}
 						else
 						{
+							// Simple type (BoolProperty, IntProperty, etc.)
+							ReturnTypeInfo = PropType;
 							UE_LOG(LogTemp, Log, TEXT("  Function '%s' has return type: %s"), *FuncName, *PropType);
 						}
 						
